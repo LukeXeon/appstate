@@ -55,7 +55,7 @@ object AppStateObserver {
                     override fun onActivityStopped(activity: Activity) {
                         process.notifyMainProcess(
                             activity,
-                            VALUE_ON_STARTED
+                            VALUE_ON_STOPPED
                         )
                     }
 
