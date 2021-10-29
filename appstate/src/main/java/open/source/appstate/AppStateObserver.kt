@@ -1,0 +1,343 @@
+package open.source.appstate
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.ActivityManager
+import android.app.Application
+import android.content.*
+import android.content.pm.ApplicationInfo
+import android.database.Cursor
+import android.net.Uri
+import android.os.*
+import androidx.annotation.MainThread
+import androidx.annotation.RestrictTo
+import androidx.core.app.BundleCompat
+import androidx.core.content.ContentProviderCompat
+import java.io.File
+import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.atomic.AtomicBoolean
+
+object AppStateObserver {
+
+    private const val KEY_PROCESS_NAME = "process_name"
+    private const val KEY_EVENT = "event"
+    private const val KEY_BINDER = "binder"
+    private const val VALUE_ON_STARTED = 1
+    private const val VALUE_ON_STOPPED = 2
+    private const val VALUE_ON_FOREGROUND = 1
+    private const val VALUE_ON_BACKGROUND = 2
+
+    @Deprecated("Internal use", level = DeprecationLevel.HIDDEN)
+    @RestrictTo(RestrictTo.Scope.LIBRARY)
+    class Receiver : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            process.onReceiveEvent(context, intent)
+        }
+    }
+
+    @Deprecated("Internal use", level = DeprecationLevel.HIDDEN)
+    @RestrictTo(RestrictTo.Scope.LIBRARY)
+    class Startup : ContentProvider() {
+        override fun onCreate(): Boolean {
+            val application = ContentProviderCompat
+                .requireContext(this)
+                .applicationContext as Application
+            application.registerActivityLifecycleCallbacks(object :
+                Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+
+                }
+
+                override fun onActivityStarted(activity: Activity) {
+                    process.notifyMainProcess(activity, VALUE_ON_STARTED)
+                }
+
+                override fun onActivityResumed(activity: Activity) {
+
+                }
+
+                override fun onActivityPaused(activity: Activity) {
+
+                }
+
+                override fun onActivityStopped(activity: Activity) {
+                    process.notifyMainProcess(activity, VALUE_ON_STOPPED)
+                }
+
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
+
+                }
+
+                override fun onActivityDestroyed(activity: Activity) {
+
+                }
+            })
+            return true
+        }
+
+        override fun query(
+            uri: Uri,
+            projection: Array<out String>?,
+            selection: String?,
+            selectionArgs: Array<out String>?,
+            sortOrder: String?
+        ): Cursor? {
+            return null
+        }
+
+        override fun getType(uri: Uri): String? {
+            return null
+        }
+
+        override fun insert(uri: Uri, values: ContentValues?): Uri? {
+            return null
+        }
+
+        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
+            return 0
+        }
+
+        override fun update(
+            uri: Uri,
+            values: ContentValues?,
+            selection: String?,
+            selectionArgs: Array<out String>?
+        ): Int {
+            return 0
+        }
+
+    }
+
+    interface OnChangeListener {
+        @MainThread
+        fun onChanged(isBackground: Boolean)
+    }
+
+    private abstract class AnyProcess {
+        private val state = AtomicBoolean(false)
+        private val observers = CopyOnWriteArraySet<OnChangeListener>()
+        private val stub = object : IAppStateObserver.Stub() {
+            override fun onChanged(isBackground: Boolean) {
+                handler.obtainMessage(if (isBackground) VALUE_ON_BACKGROUND else VALUE_ON_FOREGROUND)
+                    .sendToTarget()
+            }
+        }
+        private val handler = Handler(Looper.getMainLooper()) { msg ->
+            when (msg.what) {
+                VALUE_ON_FOREGROUND -> {
+                    onReceiveChanged(false)
+                    true
+                }
+                VALUE_ON_BACKGROUND -> {
+                    onReceiveChanged(true)
+                    true
+                }
+                else -> false
+            }
+        }
+
+        fun addObserver(observer: OnChangeListener) {
+            observers.add(observer)
+        }
+
+        fun removeObserver(observer: OnChangeListener) {
+            observers.remove(observer)
+        }
+
+        protected open fun onReceiveChanged(isBackground: Boolean) {
+            observers.forEach {
+                it.onChanged(isBackground)
+            }
+        }
+
+        open fun onReceiveEvent(context: Context, intent: Intent) {
+            if (isDebugMode(context)) {
+                throw IllegalStateException("Called only on the main process")
+            }
+        }
+
+        var isBackground: Boolean = false
+            protected set
+
+        fun notifyMainProcess(context: Context, event: Int) {
+            context.runCatching {
+                sendBroadcast(Intent(getNotifyAction(context)).apply {
+                    setPackage(context.packageName)
+                    setClass(context, AppStateObserver::class.java)
+                    putExtra(KEY_EVENT, event)
+                    putExtra(KEY_PROCESS_NAME, getProcessName())
+                    if (state.compareAndSet(false, true)) {
+                        // 用于监控进程死没死
+                        putExtra(KEY_BINDER, Bundle().apply {
+                            BundleCompat.putBinder(this, KEY_BINDER, stub.asBinder())
+                        })
+                    }
+                })
+            }
+        }
+
+    }
+
+    private class ChildProcess : AnyProcess() {
+
+        override fun onReceiveChanged(isBackground: Boolean) {
+            this.isBackground = isBackground
+            super.onReceiveChanged(isBackground)
+        }
+
+    }
+
+    private class Counter(val name: String) {
+        var value: Int = 0
+    }
+
+    private class MainProcess : AnyProcess() {
+        
+        private val callbacks = RemoteCallbackList<IAppStateObserver>()
+
+        override fun onReceiveEvent(context: Context, intent: Intent) {
+            val name = intent.getStringExtra(KEY_PROCESS_NAME)
+            if (name.isNullOrEmpty()) {
+                return
+            }
+            val binder = intent.getBundleExtra(KEY_BINDER)
+                ?.let { BundleCompat.getBinder(it, KEY_BINDER) }
+            if (binder != null) {
+                callbacks.register(
+                    IAppStateObserver.Stub.asInterface(binder),
+                    Counter(name)
+                )
+            }
+            try {
+                var count = 0
+                val size = callbacks.beginBroadcast()
+                for (i in 0 until size) {
+                    val counter = callbacks.getBroadcastCookie(i) as Counter
+                    if (counter.name == name) {
+                        when (intent.getIntExtra(KEY_EVENT, 0)) {
+                            VALUE_ON_STARTED -> {
+                                ++counter.value
+                            }
+                            VALUE_ON_STOPPED -> {
+                                --counter.value
+                            }
+                            else -> return
+                        }
+                        count += counter.value
+                    }
+                }
+                for (i in 0 until size) {
+                    val callback = callbacks.getBroadcastItem(0)
+                    if (count == 0) {
+                        callback.runCatching { onChanged(true) }
+                    } else if (isBackground) {
+                        callback.runCatching { onChanged(false) }
+                    }
+                }
+            } finally {
+                callbacks.finishBroadcast()
+            }
+        }
+
+    }
+
+    private val processName: Array<String?> = arrayOf(null)
+
+    private val process by lazy {
+        if (isMainProcess()) {
+            MainProcess()
+        } else {
+            ChildProcess()
+        }
+    }
+
+    private fun isDebugMode(context: Context): Boolean {
+        return context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+    }
+
+    @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
+    private fun getProcessName(): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return Application.getProcessName()
+        } else {
+            synchronized(processName) {
+                var name: String? = processName[0]
+                var activityThread: Any? = null
+                if (!name.isNullOrEmpty()) {
+                    return name
+                } else {
+                    name = runCatching {
+                        val activityThreadClass = Class.forName("android.app.ActivityThread")
+                        activityThread = activityThreadClass
+                            .getDeclaredMethod("currentActivityThread")
+                            .apply {
+                                isAccessible = true
+                            }.invoke(null)
+                        activityThreadClass
+                            .getDeclaredMethod("currentProcessName")
+                            .apply {
+                                isAccessible = true
+                            }.invoke(activityThread)
+                            ?.toString()
+                    }.getOrNull()
+                    if (name.isNullOrEmpty()) {
+                        val pid = Process.myPid()
+                        File("/proc/" + Process.myPid() + "/cmdline")
+                            .runCatching {
+                                reader().buffered().use {
+                                    var pName = it.readLine()
+                                    if (!pName.isNullOrEmpty()) {
+                                        pName = pName.trim()
+                                        if (!pName.isNullOrEmpty()) {
+                                            name = pName
+                                        }
+                                    }
+                                }
+                            }
+                        if (name.isNullOrEmpty()) {
+                            runCatching {
+                                val context = activityThread!!.javaClass
+                                    .getDeclaredMethod("currentApplication")
+                                    .apply {
+                                        isAccessible = true
+                                    }.invoke(null) as Context
+                                val am = context.getSystemService(Context.ACTIVITY_SERVICE)
+                                        as ActivityManager
+                                name = am.runningAppProcesses.find {
+                                    it.pid == pid
+                                }?.processName
+                            }
+                        }
+                    }
+                    processName[0] = name
+                }
+                return name!!
+            }
+        }
+    }
+
+    private fun getNotifyAction(context: Context): String {
+        return context.packageName + ".APP_STATE_NOTIFY_ACTIVITY_EVENT"
+    }
+
+    private fun isMainProcess(): Boolean {
+        return !getProcessName().contains(":")
+    }
+
+    @JvmStatic
+    fun addObserver(observer: OnChangeListener) {
+        process.addObserver(observer)
+    }
+
+    @JvmStatic
+    fun removeObserver(observer: OnChangeListener) {
+        process.removeObserver(observer)
+    }
+
+    @JvmStatic
+    val isBackground: Boolean
+        get() {
+            return process.isBackground
+        }
+
+}

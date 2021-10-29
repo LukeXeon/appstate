@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="open.source.appstate">
+
+    <application>
+        <receiver
+            android:name=".AppStateObserver$Receiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="${applicationId}.APP_STATE_NOTIFY_ACTIVITY_EVENT" />
+            </intent-filter>
+        </receiver>
+        <provider
+            android:name=".AppStateObserver$Startup"
+            android:authorities="${applicationId}.app-state-observer"
+            android:exported="false"
+            android:multiprocess="true" />
+    </application>
+</manifest>

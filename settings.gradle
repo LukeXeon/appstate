@@ -1,0 +1,3 @@
+include ':appstate'
+include ':app'
+rootProject.name = "ipcview"
