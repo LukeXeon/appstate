@@ -129,7 +129,7 @@ object AppStateObserver {
         fun onChanged(isBackground: Boolean)
     }
 
-    private abstract class AnyProcess {
+    private open class AnyProcess {
         private val state = AtomicBoolean(false)
         private val observers = CopyOnWriteArraySet<OnChangeListener>()
         private val stub = object : IAppStateObserver.Stub() {
@@ -137,17 +137,15 @@ object AppStateObserver {
                 handler.obtainMessage(MSG_ON_CHANGED)
                     .apply {
                         arg1 = if (isBackground) 1 else 0
-                    }
-                    .sendToTarget()
+                    }.sendToTarget()
             }
         }
         private val handler = Handler(Looper.getMainLooper()) { msg ->
-            when (msg.what) {
-                MSG_ON_CHANGED -> {
-                    onReceiveChanged(msg.arg1 == 0)
-                    true
-                }
-                else -> false
+            if (msg.what == MSG_ON_CHANGED) {
+                onReceiveChanged(msg.arg1 == 0)
+                true
+            } else {
+                false
             }
         }
 
@@ -159,7 +157,8 @@ object AppStateObserver {
             observers.remove(observer)
         }
 
-        protected open fun onReceiveChanged(isBackground: Boolean) {
+        private fun onReceiveChanged(isBackground: Boolean) {
+            this.isBackground = isBackground
             observers.forEach {
                 it.onChanged(isBackground)
             }
@@ -173,7 +172,7 @@ object AppStateObserver {
 
         @Volatile
         var isBackground: Boolean = false
-            protected set
+            private set
 
         fun notifyMainProcess(context: Context, event: Int) {
             context.runCatching {
@@ -190,15 +189,6 @@ object AppStateObserver {
                     }
                 })
             }
-        }
-
-    }
-
-    private class ChildProcess : AnyProcess() {
-
-        override fun onReceiveChanged(isBackground: Boolean) {
-            this.isBackground = isBackground
-            super.onReceiveChanged(isBackground)
         }
 
     }
@@ -220,30 +210,28 @@ object AppStateObserver {
                     Counter(name)
                 )
             }
+            val modify = when (intent.getIntExtra(KEY_EVENT, 0)) {
+                VALUE_ON_STARTED -> 1
+                VALUE_ON_STOPPED -> -1
+                else -> return
+            }
             try {
                 var count = 0
                 val size = callbacks.beginBroadcast()
                 for (i in 0 until size) {
                     val counter = callbacks.getBroadcastCookie(i) as Counter
                     if (counter.name == name) {
-                        when (intent.getIntExtra(KEY_EVENT, 0)) {
-                            VALUE_ON_STARTED -> {
-                                ++counter.value
-                            }
-                            VALUE_ON_STOPPED -> {
-                                --counter.value
-                            }
-                            else -> return
-                        }
-                        count += counter.value
+                        counter.value += modify
                     }
+                    count += counter.value
                 }
                 for (i in 0 until size) {
-                    val callback = callbacks.getBroadcastItem(i)
-                    if (count == 0) {
-                        callback.runCatching { onChanged(true) }
-                    } else if (isBackground) {
-                        callback.runCatching { onChanged(false) }
+                    callbacks.getBroadcastItem(i).runCatching {
+                        if (count == 0) {
+                            onChanged(true)
+                        } else if (isBackground) {
+                            onChanged(false)
+                        }
                     }
                 }
             } finally {
@@ -331,7 +319,7 @@ object AppStateObserver {
         if (isMainProcess) {
             MainProcess()
         } else {
-            ChildProcess()
+            AnyProcess()
         }
     }
 
