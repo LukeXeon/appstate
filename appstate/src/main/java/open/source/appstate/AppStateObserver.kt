@@ -14,6 +14,7 @@ import androidx.annotation.RestrictTo
 import androidx.core.app.BundleCompat
 import androidx.core.content.ContentProviderCompat
 import java.io.File
+import java.util.*
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -312,7 +313,7 @@ object AppStateObserver {
                     }
                 }
             }
-            name ?: ""
+            name ?: UUID.randomUUID().toString()
         }
     }
 
