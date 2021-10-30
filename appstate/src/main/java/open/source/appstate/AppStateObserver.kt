@@ -36,7 +36,7 @@ object AppStateObserver {
 
     @Deprecated("Internal use", level = DeprecationLevel.HIDDEN)
     @RestrictTo(RestrictTo.Scope.LIBRARY)
-    internal class Startup : ContentProvider() {
+    internal class Provider : ContentProvider() {
         override fun onCreate(): Boolean {
             val application = ContentProviderCompat
                 .requireContext(this)
@@ -87,6 +87,10 @@ object AppStateObserver {
             return true
         }
 
+        override fun getType(uri: Uri): String {
+            return process.isBackground.toString()
+        }
+
         override fun query(
             uri: Uri,
             projection: Array<out String>?,
@@ -97,15 +101,18 @@ object AppStateObserver {
             return null
         }
 
-        override fun getType(uri: Uri): String? {
+        override fun insert(
+            uri: Uri,
+            values: ContentValues?
+        ): Uri? {
             return null
         }
 
-        override fun insert(uri: Uri, values: ContentValues?): Uri? {
-            return null
-        }
-
-        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
+        override fun delete(
+            uri: Uri,
+            selection: String?,
+            selectionArgs: Array<out String>?
+        ): Int {
             return 0
         }
 
@@ -131,7 +138,6 @@ object AppStateObserver {
 
     private open class AnyProcess {
         private val state = AtomicBoolean(false)
-        private val observers = CopyOnWriteArraySet<OnChangeListener>()
         private val stub = object : IAppStateObserver.Stub() {
             override fun onChanged(isBackground: Boolean) {
                 handler.obtainMessage(MSG_ON_CHANGED)
@@ -149,15 +155,7 @@ object AppStateObserver {
             }
         }
 
-        fun addObserver(observer: OnChangeListener) {
-            observers.add(observer)
-        }
-
-        fun removeObserver(observer: OnChangeListener) {
-            observers.remove(observer)
-        }
-
-        protected open fun onReceiveChanged(isBackground: Boolean) {
+        private fun onReceiveChanged(isBackground: Boolean) {
             observers.forEach {
                 it.onChanged(isBackground)
             }
@@ -169,9 +167,14 @@ object AppStateObserver {
             }
         }
 
-        @Volatile
-        var isBackground: Boolean = false
-            protected set
+        open val isBackground: Boolean
+            get() {
+                if (isDebugMode) {
+                    throw IllegalStateException("Called only on the main process")
+                } else {
+                    return false
+                }
+            }
 
         fun notifyMainProcess(context: Context, event: Int) {
             context.runCatching {
@@ -190,13 +193,6 @@ object AppStateObserver {
             }.exceptionOrNull()?.printStackTrace()
         }
 
-    }
-
-    private class ChildProcess : AnyProcess() {
-        override fun onReceiveChanged(isBackground: Boolean) {
-            this.isBackground = isBackground
-            super.onReceiveChanged(isBackground)
-        }
     }
 
     private class MainProcess : AnyProcess() {
@@ -250,6 +246,8 @@ object AppStateObserver {
             }
         }
 
+        @Volatile
+        override var isBackground: Boolean = false
     }
 
     @Suppress("PrivateApi", "DiscouragedPrivateApi")
@@ -318,6 +316,10 @@ object AppStateObserver {
         }
     }
 
+    private val isBackgroundUri by lazy {
+        Uri.parse("${application!!.packageName}.app-state-is-background")
+    }
+
     private val notifyAction: String by lazy {
         application!!.packageName + ".APP_STATE_NOTIFY_ACTIVITY_EVENT"
     }
@@ -330,9 +332,11 @@ object AppStateObserver {
         if (isMainProcess) {
             MainProcess()
         } else {
-            ChildProcess()
+            AnyProcess()
         }
     }
+
+    private val observers = CopyOnWriteArraySet<OnChangeListener>()
 
     private val isDebugMode: Boolean by lazy {
         application!!.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
@@ -340,18 +344,18 @@ object AppStateObserver {
 
     @JvmStatic
     fun addObserver(observer: OnChangeListener) {
-        process.addObserver(observer)
+        observers.add(observer)
     }
 
     @JvmStatic
     fun removeObserver(observer: OnChangeListener) {
-        process.removeObserver(observer)
+        observers.remove(observer)
     }
 
     @JvmStatic
     val isBackground: Boolean
         get() {
-            return process.isBackground
+            return application!!.contentResolver.getType(isBackgroundUri).toBoolean()
         }
 
 }

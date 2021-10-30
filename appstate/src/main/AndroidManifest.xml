@@ -10,9 +10,15 @@
                 <action android:name="${applicationId}.APP_STATE_NOTIFY_ACTIVITY_EVENT" />
             </intent-filter>
         </receiver>
+
         <provider
-            android:name=".AppStateObserver$Startup"
-            android:authorities="${applicationId}.app-state-observer"
+            android:name=".AppStateObserver$Provider"
+            android:authorities="${applicationId}.app-state-is-background"
+            android:exported="false"
+            android:multiprocess="false" />
+        <provider
+            android:name=".AppStateObserver$Provider"
+            android:authorities="${applicationId}.app-state-startup"
             android:exported="false"
             android:multiprocess="true" />
     </application>
