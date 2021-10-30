@@ -24,8 +24,7 @@ object AppStateObserver {
     private const val KEY_BINDER = "binder"
     private const val VALUE_ON_STARTED = 1
     private const val VALUE_ON_STOPPED = 2
-    private const val VALUE_ON_FOREGROUND = 1
-    private const val VALUE_ON_BACKGROUND = 2
+    private const val MSG_ON_CHANGED = 1
 
     @Deprecated("Internal use", level = DeprecationLevel.HIDDEN)
     @RestrictTo(RestrictTo.Scope.LIBRARY)
@@ -42,6 +41,7 @@ object AppStateObserver {
             val application = ContentProviderCompat
                 .requireContext(this)
                 .applicationContext as Application
+            AppStateObserver.application = application
             application.registerActivityLifecycleCallbacks(
                 object : ActivityLifecycleCallbacks {
 
@@ -134,18 +134,17 @@ object AppStateObserver {
         private val observers = CopyOnWriteArraySet<OnChangeListener>()
         private val stub = object : IAppStateObserver.Stub() {
             override fun onChanged(isBackground: Boolean) {
-                handler.obtainMessage(if (isBackground) VALUE_ON_BACKGROUND else VALUE_ON_FOREGROUND)
+                handler.obtainMessage(MSG_ON_CHANGED)
+                    .apply {
+                        arg1 = if (isBackground) 1 else 0
+                    }
                     .sendToTarget()
             }
         }
         private val handler = Handler(Looper.getMainLooper()) { msg ->
             when (msg.what) {
-                VALUE_ON_FOREGROUND -> {
-                    onReceiveChanged(false)
-                    true
-                }
-                VALUE_ON_BACKGROUND -> {
-                    onReceiveChanged(true)
+                MSG_ON_CHANGED -> {
+                    onReceiveChanged(msg.arg1 == 0)
                     true
                 }
                 else -> false
@@ -172,6 +171,7 @@ object AppStateObserver {
             }
         }
 
+        @Volatile
         var isBackground: Boolean = false
             protected set
 
@@ -264,15 +264,20 @@ object AppStateObserver {
         }.getOrNull()
     }
 
-    private val application by lazy {
-        runCatching {
-            activityThread!!.javaClass
-                .getDeclaredMethod("currentApplication")
-                .apply {
-                    isAccessible = true
-                }.invoke(null) as Application
-        }.getOrNull()
-    }
+    @Volatile
+    private var application: Application? = null
+        get() {
+            if (field == null) {
+                field = runCatching {
+                    activityThread!!.javaClass
+                        .getDeclaredMethod("currentApplication")
+                        .apply {
+                            isAccessible = true
+                        }.invoke(null) as Application
+                }.getOrNull()
+            }
+            return field
+        }
 
     private val processName by lazy {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
