@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 object AppStateObserver {
 
+    private const val TAG = "AppStateObserver"
     private const val KEY_PROCESS_NAME = "process_name"
     private const val KEY_EVENT = "event"
     private const val KEY_BINDER = "binder"
@@ -26,9 +27,8 @@ object AppStateObserver {
     private const val VALUE_ON_STOPPED = 2
     private const val MSG_ON_CHANGED = 1
 
-    @Deprecated("Internal use", level = DeprecationLevel.HIDDEN)
     @RestrictTo(RestrictTo.Scope.LIBRARY)
-    class Receiver : BroadcastReceiver() {
+    internal class Receiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             process.onReceiveEvent(context, intent)
         }
@@ -36,7 +36,7 @@ object AppStateObserver {
 
     @Deprecated("Internal use", level = DeprecationLevel.HIDDEN)
     @RestrictTo(RestrictTo.Scope.LIBRARY)
-    class Startup : ContentProvider() {
+    internal class Startup : ContentProvider() {
         override fun onCreate(): Boolean {
             val application = ContentProviderCompat
                 .requireContext(this)
@@ -157,8 +157,7 @@ object AppStateObserver {
             observers.remove(observer)
         }
 
-        private fun onReceiveChanged(isBackground: Boolean) {
-            this.isBackground = isBackground
+        protected open fun onReceiveChanged(isBackground: Boolean) {
             observers.forEach {
                 it.onChanged(isBackground)
             }
@@ -172,13 +171,13 @@ object AppStateObserver {
 
         @Volatile
         var isBackground: Boolean = false
-            private set
+            protected set
 
         fun notifyMainProcess(context: Context, event: Int) {
             context.runCatching {
                 sendBroadcast(Intent(notifyAction).apply {
                     setPackage(context.packageName)
-                    setClass(context, AppStateObserver::class.java)
+                    setClass(context, Receiver::class.java)
                     putExtra(KEY_EVENT, event)
                     putExtra(KEY_PROCESS_NAME, processName)
                     if (state.compareAndSet(false, true)) {
@@ -188,9 +187,16 @@ object AppStateObserver {
                         })
                     }
                 })
-            }
+            }.exceptionOrNull()?.printStackTrace()
         }
 
+    }
+
+    private class ChildProcess : AnyProcess() {
+        override fun onReceiveChanged(isBackground: Boolean) {
+            this.isBackground = isBackground
+            super.onReceiveChanged(isBackground)
+        }
     }
 
     private class MainProcess : AnyProcess() {
@@ -225,12 +231,17 @@ object AppStateObserver {
                     }
                     count += counter.value
                 }
-                for (i in 0 until size) {
-                    callbacks.getBroadcastItem(i).runCatching {
-                        if (count == 0) {
-                            onChanged(true)
-                        } else if (isBackground) {
-                            onChanged(false)
+                val oldValue = isBackground
+                if (count == 0) {
+                    isBackground = true
+                } else if (oldValue) {
+                    isBackground = false
+                }
+                val changed = isBackground != oldValue
+                if (changed) {
+                    for (i in 0 until size) {
+                        callbacks.getBroadcastItem(i).runCatching {
+                            onChanged(isBackground)
                         }
                     }
                 }
@@ -312,14 +323,14 @@ object AppStateObserver {
     }
 
     private val isMainProcess: Boolean by lazy {
-        processName.contains(":")
+        !processName.contains(":")
     }
 
     private val process by lazy {
         if (isMainProcess) {
             MainProcess()
         } else {
-            AnyProcess()
+            ChildProcess()
         }
     }
 
